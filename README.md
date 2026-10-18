@@ -2,18 +2,17 @@
 
 Implementation of **Subject-block calibrated adaptive observation for PPG respiratory-rate estimation**. A causal prefix predictor estimates rate and residual scale; one conformal score per subject covers four episodes and five prefixes before a quality-gated stopping policy selects an output.
 
-## Install
+## Installation
 
-Use Python 3.10 or newer:
+Requires Python `>=3.10`. Run from the repository root in an activated environment.
 
 ```bash
-python -m venv .venv
 python -m pip install -e .
 ```
 
-Activate the virtual environment before installation. PyTorch uses the CPU by default; pass `--device cuda` for a compatible GPU installation.
+Inspection environment: Python 3.13.5; numpy 2.1.3, scipy 1.15.3, torch 2.7.1+cu118, matplotlib 3.10.0. Checks: Python syntax, configuration parsing and CLI/source argument matching. Training and full evaluation were not run.
 
-## Prepare recordings
+## Data and preprocessing
 
 Obtain PPG and annotated breath events from the [BIDMC PPG and Respiration Dataset](https://physionet.org/content/bidmc/1.0.0/) or the CapnoBase respiratory-rate benchmark. Export one NumPy archive per subject with `ppg` (one-dimensional measured signal), scalar `fs` (Hz), and `breath_times` (annotated breath-event timestamps in seconds from recording start). Keep the signal at its recorded sampling rate. Do not replace breath events with an unseen future-window average.
 
@@ -30,35 +29,43 @@ Create `data/manifest.json`, with paths relative to that manifest:
 
 Use all selected subjects in your actual manifest. Assign complete subjects to mutually exclusive partitions before creating windows. The example demonstrates the schema; it is too small for finite 90% block calibration. Freeze starts, partitions and annotation eligibility before fitting. Ten independent calibration subjects allow a finite 90% rank; a 95% rank needs at least nineteen.
 
-```bash
-anytimerr prepare --manifest data/manifest.json --output data/prepared
-anytimerr train --data data/prepared --epochs 40 --output runs/train
-anytimerr evaluate --data data/prepared --checkpoint runs/train/model.pt --output runs/full
-```
+
 
 Preparation extracts four nonoverlapping 64-second episodes per subject. Each target uses only the last completed valid interbreath interval at the corresponding 16, 24, 32, 48 or 64-second endpoint. Intervals outside 1.4–10 seconds are ineligible; preparation rejects an incomplete block instead of selecting episodes by prediction error. Review reference eligibility before finalizing the manifest.
 
-## Comparisons and ablations
-
-Run the same frozen checkpoint and partitions with separate output directories:
-
 ```bash
-anytimerr evaluate --policy fixed16 --output runs/fixed16
-anytimerr evaluate --policy fixed32 --output runs/fixed32
-anytimerr evaluate --policy fixed64 --output runs/fixed64
-anytimerr evaluate --predictor spectral --policy fixed32 --output runs/spectral32
-anytimerr evaluate --policy scale --output runs/scale_stopping
-anytimerr evaluate --calibration marginal --output runs/marginal
-anytimerr evaluate --calibration pooled --output runs/pooled
-anytimerr evaluate --no-gate --output runs/no_gate
-anytimerr evaluate --constant-scale --output runs/constant_scale
-anytimerr evaluate --width 1.0 --output runs/width1
-anytimerr evaluate --width 3.0 --output runs/width3
+anytimerr prepare --manifest data/manifest.json --output data/prepared
 ```
 
-`--alpha` selects the conformal error level; `--width` sets the allowable interval half-width in breaths/min. `--min-cycles` and `--concentration` define observable respiratory evidence. Select these values using development subjects, then freeze them. `--epochs`, `--lr` and `--seed` control fitting. `--checkpoint`, `--data` and `--device` may be passed to every evaluation.
+## Training and inference
 
-`block` takes the maximum standardized residual over every episode and prefix within each calibration subject. `marginal` calibrates each prefix using pooled episodes; `pooled` pools all episode/prefix scores. The latter two are controls with different calibration units. A rank beyond the available scores produces unbounded intervals and adaptive withholding. `fixed16/32/64` always emit at the declared horizon; `scale` stops using the residual scale directly.
+```bash
+anytimerr train --data data/prepared --epochs 40 --output runs/train --seed 42
+```
+
+## Evaluation
+
+```bash
+anytimerr evaluate --data data/prepared --checkpoint runs/train/model.pt --output runs/full
+```
+
+## Comparisons and ablations
+
+```bash
+anytimerr evaluate --data data/prepared --checkpoint runs/train/model.pt --policy fixed16 --output runs/fixed16
+anytimerr evaluate --data data/prepared --checkpoint runs/train/model.pt --policy fixed32 --output runs/fixed32
+anytimerr evaluate --data data/prepared --checkpoint runs/train/model.pt --policy fixed64 --output runs/fixed64
+anytimerr evaluate --data data/prepared --checkpoint runs/train/model.pt --predictor spectral --policy fixed32 --output runs/spectral32
+anytimerr evaluate --data data/prepared --checkpoint runs/train/model.pt --policy scale --output runs/scale_stopping
+anytimerr evaluate --data data/prepared --checkpoint runs/train/model.pt --calibration marginal --output runs/marginal
+anytimerr evaluate --data data/prepared --checkpoint runs/train/model.pt --calibration pooled --output runs/pooled
+anytimerr evaluate --data data/prepared --checkpoint runs/train/model.pt --no-gate --output runs/no_gate
+anytimerr evaluate --data data/prepared --checkpoint runs/train/model.pt --constant-scale --output runs/constant_scale
+anytimerr evaluate --data data/prepared --checkpoint runs/train/model.pt --width 1.0 --output runs/width1
+anytimerr evaluate --data data/prepared --checkpoint runs/train/model.pt --width 3.0 --output runs/width3
+```
+
+Evaluate each fitted training control with its own checkpoint.
 
 ## Outputs
 
@@ -69,7 +76,3 @@ Training writes `model.pt` and `history.json`. Evaluation writes:
 - `rates.png`: emitted estimates against their selected-prefix targets.
 
 MAE, RMSE and emitted coverage use emitted episodes. Joint coverage uses all episode/prefix targets, including candidates never selected. Observation time includes withheld episodes at 64 seconds. With no emitted estimates, conditional metrics are `null`; withholding does not become a zero error.
-
-## Implementation choices
-
-The compact encoder uses left-padded convolutions and prefix-only normalization; no future episode samples enter a prediction. Positive scales are trained with the paper's absolute-residual/scale plus log-scale objective and equal weight per subject. The cycle gate uses spectral concentration in 0.1–0.7 Hz and the implied number of observed cycles, calculated from the current prefix only. The spectral baseline uses that band directly. It is a spectral-modulation comparison; the compact learned encoder is not labeled RRWaveNet or a Smart Fusion implementation. The fixed-horizon learned controls share this encoder to isolate observation and calibration choices. Input conversion from proprietary CapnoBase formats is performed before manifest preparation.
